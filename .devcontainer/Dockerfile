@@ -4,18 +4,11 @@ FROM ubuntu@sha256:79efa276fdefa2ee3911db29b0608f8c0561c347ec3f4d4139980d43b168d
 RUN apt clean
 RUN apt update
 
-# Install common tools
-RUN apt install -y python3-minimal python3-pip pipx git less vim sudo cmake make g++-15 clang-format clangd-20
-
-# Install additional tools and libraries
-RUN apt install -y libsfml-dev
-
-# Cleanup
-RUN apt autoremove -y \
-    && apt autoclean \
-    && rm -rf /var/lib/apt/lists/* \
-    && rm -rf /var/cache/apt/* \
-    && rm -rf /tmp/*
+# Install
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3-minimal python3-pip pipx git less g++-15 vim sudo cmake make \
+    clang-format clangd-20 libsfml-dev \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Update  gcc/g++ version to the latest ones
 RUN ln -fs /usr/bin/g++-15 /usr/bin/g++

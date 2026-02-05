@@ -7,7 +7,7 @@
 #include <SFML/Graphics.hpp>
 
 #include <exec/any_sender_of.hpp>
-#include <exec/repeat_effect_until.hpp>
+#include <exec/repeat_until.hpp>
 #include <exec/static_thread_pool.hpp>
 #include <stdexec/execution.hpp>
 
@@ -21,24 +21,21 @@ namespace ex = stdexec;
 
 class WaitForFPS {
 public:
-    static constexpr float TARGET_FPS = 60.0f;
-    static constexpr float FRAME_TIME_MS = 1000.0f / TARGET_FPS;
-
-    explicit WaitForFPS(FrameClock &frame_clock, unsigned int target_fps)
-        : frame_clock_(frame_clock), frame_time_(1s / target_fps) {}
+    explicit WaitForFPS(FrameClock &frame_clock, unsigned int target_fps = 60)
+        : frame_clock_(frame_clock),
+          frame_time_(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::seconds(1) / target_fps)) {}
 
     void operator()() {
-        auto cur_frame_duration = frame_clock_.GetFrameTime();
-
-        if (cur_frame_duration < frame_time_) {
-            std::this_thread::sleep_for(frame_time_ - cur_frame_duration);
+        auto elapsed = frame_clock_.GetFrameTime();
+        if (elapsed < frame_time_) {
+            std::this_thread::sleep_for(frame_time_ - elapsed);
         }
         frame_clock_.Reset();
     }
 
 private:
     FrameClock &frame_clock_;
-    const std::chrono::milliseconds frame_time_ = 1ms;
+    const std::chrono::milliseconds frame_time_;
 };
 
 class MandelbrotApp {
@@ -51,24 +48,38 @@ public:
         auto compute_sched = compute_pool_.get_scheduler();
         auto sfml_sched = sfml_thread_.get_scheduler();
 
+        // Инициализация SFML-состояния в выделенном потоке
         auto initialize =
-            ex::on(sfml_sched,
-                   ex::just() | ex::then([this]() {
-                       state_ = std::make_unique<SfmlState>(  //
-                           RenderSettings{.width = 800, .height = 600, .max_iterations = 100, .escape_radius = 2.0});
-                   }));
+            ex::on(sfml_sched, ex::just() | ex::then([this]() {
+                                   state_ = std::make_unique<SfmlState>(RenderSettings{
+                                       .width = 800, .height = 600, .max_iterations = 100, .escape_radius = 2.0});
+                               }));
         ex::sync_wait(std::move(initialize));
 
-        auto process_frame = ex::just(); // Ваш код здесь
+        // Основной пайплайн обработки одного кадра
+        auto process_frame =
+            ex::on(sfml_sched, SfmlEventHandler{state_->window, state_->render_settings, state_->app_state}) |
+            ex::let_value([this, compute_sched, sfml_sched]() {
+                bool need_rerender = state_->app_state.need_rerender;
+                state_->app_state.need_rerender = false;
 
+                auto compute =
+                    ex::just(&state_->fb) |
+                    mandelbrot::MakeComputeSender(state_->render_settings, state_->app_state.viewport, need_rerender);
+                auto display = render::MakeSfmlDisplaySender(*state_);
+
+                return ex::on(compute_sched, std::move(compute)) | ex::on(sfml_sched, std::move(display));
+            }) |
+            ex::then([this]() { WaitForFPS{state_->frame_clock, 60}(); });
+
+        // Бесконечный цикл выполнения пайплайна до выхода
         auto repeated_pipeline = std::move(process_frame) | ex::then([this] { return state_->app_state.should_exit; }) |
-                                 exec::repeat_effect_until();
+                                 exec::repeat_until();
         ex::sync_wait(std::move(repeated_pipeline));
     }
 
 private:
     std::unique_ptr<SfmlState> state_;
-
     exec::static_thread_pool compute_pool_;
     exec::static_thread_pool sfml_thread_;
 };
